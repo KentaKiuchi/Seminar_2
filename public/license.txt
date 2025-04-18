@@ -1,0 +1,8 @@
+Model Information:
+* title:	Football soccer field
+* source:	https://sketchfab.com/3d-models/football-soccer-field-39d4cab4629c453693cb1c49b6528d59
+* author:	FrancescoMilanese (https://sketchfab.com/FrancescoMilanese)
+
+Model License:
+* license type:	SKETCHFAB Standard (https://sketchfab.com/licenses)
+* requirements:	Under basic restrictions, use worldwide, on all types of media, commercially or not, and in all types of derivative works
