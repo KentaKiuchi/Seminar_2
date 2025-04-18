@@ -1,0 +1,889 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8" />
+  <title>Text 2 Pitch</title>
+  <style>
+    body { margin:0; padding:0; overflow:hidden; }
+
+    /* 下部コントロール */
+    #controls {
+      position:absolute; bottom:20px; left:50%;
+      transform:translateX(-50%);
+      background:rgba(255,255,255,0.8);
+      padding:10px; border-radius:5px;
+    }
+    #time-display { font-size:24px; font-weight:bold; }
+    #jump-input { width:60px; }
+
+    /* ローディング表示 */
+    #loading {
+      position:absolute; top:50%; left:50%;
+      transform:translate(-50%, -50%);
+      background:rgba(255,255,255,0.8);
+      padding:20px; border-radius:5px;
+    }
+    #error-in-html { color:red; display:none; }
+
+    /* 左上のボタン */
+    #player-camera-container {
+      position:absolute; top:20px; left:20px; z-index:999;
+    }
+    #player-camera-panel {
+      display:none; margin-top:10px;
+      background:rgba(255,255,255,0.8);
+      padding:10px; border-radius:5px;
+    }
+    #camera-error { color:red; margin-top:5px; display:none; }
+    .player-number-button {
+      margin:2px; padding:5px 8px; background:#ccc;
+      border-radius:4px; cursor:pointer;
+    }
+
+    /* イベントログ(左下) */
+    #event-log {
+      position:absolute; bottom:40px; left:20px;
+      width:300px; height:200px;
+      background:rgba(0,0,0,0.7); color:white;
+      padding:10px; border-radius:5px;
+      overflow-y:auto; font-family:monospace; font-size:14px;
+      z-index:998; display:none;
+    }
+
+    /* 戦術ボード(右上) */
+    #tactical-board {
+      position:absolute; top:20px; right:20px;
+      width:400px; height:240px;
+      background:url("data/soccer_field.jpeg") no-repeat center center;
+      background-size:cover;
+      border:2px solid #333; border-radius:5px;
+      z-index:997; display:none; overflow:hidden;
+    }
+    #tactical-dots {
+      position:relative; width:100%; height:100%;
+    }
+    .dot {
+      position:absolute; width:16px; height:16px;
+      border-radius:50%; text-align:center; line-height:16px;
+      font-size:10px; font-weight:bold; color:white;
+      user-select:none; cursor:pointer;
+    }
+    .player-dot-home { background:blue; }
+    .player-dot-away { background:red; }
+
+    /* カメラ位置 */
+    #camera-dot {
+      width:10px; height:10px; background:red; border-radius:50%;
+    }
+    /* ボール(白円) */
+    #ball-2d {
+      position:absolute;
+      width:12px; height:12px;
+      background:white;
+      border-radius:50%;
+      display:none; cursor:pointer;
+    }
+  </style>
+
+  <!-- A-Frame & PapaParse -->
+  <script src="https://aframe.io/releases/1.2.0/aframe.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+</head>
+<body>
+  <div id="loading">Loading CSV...<span id="error-in-html"></span></div>
+
+  <!-- イベントログ(左下) -->
+  <div id="event-log"></div>
+
+  <!-- 戦術ボード(右上) -->
+  <div id="tactical-board">
+    <div id="tactical-dots">
+      <div id="camera-dot"></div>
+      <div id="ball-2d"></div>
+      <!-- 選手ドット(動的生成) -->
+    </div>
+  </div>
+
+  <!-- A-Frameシーン -->
+  <a-scene>
+    <a-assets>
+      <!-- フィールドモデル(gltf) -->
+      <a-asset-item id="soccer-field" src="scene.gltf"></a-asset-item>
+    </a-assets>
+
+    <!-- フィールドを拡大/位置調整 -->
+    <a-entity gltf-model="#soccer-field" 
+              scale="120 200 90"
+              position="-9 0 -15">
+    </a-entity>
+
+    <!-- カメラリグ -->
+    <a-entity id="camera-rig" position="0 2 100">
+      <a-camera id="main-camera" wasd-controls="acceleration:75;fly:true" look-controls camera="active:true">
+      </a-camera>
+    </a-entity>
+
+    <a-sky color="#ECECEC"></a-sky>
+  </a-scene>
+
+  <!-- 下部コントロール(再生/停止等) -->
+  <div id="controls">
+    <button id="play-button">Play</button>
+    <button id="pause-button">Pause</button>
+    <button id="skip-forward-button">+10s</button>
+    <button id="skip-backward-button">-10s</button>
+    <span id="time-display">00:00</span>
+    <input type="text" id="jump-input" placeholder="MMSS">
+    <button id="jump-button">Jump</button>
+  </div>
+
+  <!-- 左上: 選手視点カメラ / 戦術ボード / イベントログ ボタン -->
+  <div id="player-camera-container">
+    <button id="toggle-player-camera-button">選手視点カメラ</button>
+    <button id="toggle-tactical-board-button">戦術ボード</button>
+    <button id="toggle-event-log-button">イベントログ</button>
+
+    <div id="player-camera-panel">
+      <button id="home-team-button">Home</button>
+      <button id="away-team-button">Away</button>
+      <div id="player-number-list"></div>
+      <div id="camera-error"></div>
+    </div>
+  </div>
+
+  <script>
+/******************************************************************************
+ * 1) 2D 変換パラメータ (x軸を小さめにして調整) 
+ *    + x方向に +20ピクセルずらす
+ ******************************************************************************/
+// 例: scaleX2D=380, scaleY2D=290
+//   + xOffset2D= 20
+const scaleX2D=380;
+const scaleY2D=290;
+const offsetX2D=20;  // ← x座標を+20ピクセルずらす
+
+/** CSV -> (px,py) */
+function csvToPx(csvX, csvY){
+  return {
+    x: csvX * scaleX2D + offsetX2D,   // +20
+    y: csvY * scaleY2D
+  };
+}
+/** (px,py) -> CSV */
+function pxToCsv(px, py){
+  return {
+    x: (px - offsetX2D) / scaleX2D,   // -20
+    y: py / scaleY2D
+  };
+}
+
+/******************************************************************************
+ * 2) 3D 変換 (トラッキングデータ -> 3D空間)
+ ******************************************************************************/ 
+const scaleX3D=200;
+const scaleZ3D=120;
+const offset3D=0.5;
+function csvTo3D(csvX,csvY){
+  return {
+    x: (csvX - offset3D)*scaleX3D,
+    y: 0.5,
+    z: (csvY - offset3D)*scaleZ3D
+  };
+}
+function threeDtoCsvX(x){ return (x/scaleX3D) + offset3D; }
+function threeDtoCsvY(z){ return (z/scaleZ3D) + offset3D; }
+
+/******************************************************************************
+ * 以下、元のコードと同じ (CSV読み込み、3D/2D更新、ドラッグ同期、UI関連etc)
+ ******************************************************************************/
+
+let isPlaying=false;
+let animationFrameId;
+let startTime;
+let pauseTime=0;
+let currentIndex=0;
+let isHeightLocked=false;
+let verticalVelocity=0;
+let isPlayerCameraPanelOpen=false;
+let isTacticalBoardOpen=false;
+let isEventLogOpen=false;
+
+let players3D={home:{}, away:{}};
+let ballData3D=[];
+let players2D={home:{}, away:{}};
+let ballData2D=[];
+let timings=[];
+let eventsData=[];
+let playerCameras=[];
+
+function showErrorInHtml(msg){
+  const e=document.getElementById('error-in-html');
+  e.style.display='inline';
+  e.textContent= msg;
+}
+function appendEventLog(msg){
+  const logDiv=document.getElementById('event-log');
+  const line=document.createElement('div');
+  line.textContent=msg;
+  logDiv.appendChild(line);
+  logDiv.scrollTop= logDiv.scrollHeight;
+}
+let cameraErrorTimer=null;
+function showCameraError(m){
+  const e=document.getElementById('camera-error');
+  e.style.display='block';
+  e.textContent=m;
+  if(cameraErrorTimer) clearTimeout(cameraErrorTimer);
+  cameraErrorTimer= setTimeout(()=>hideCameraError(),3000);
+}
+function hideCameraError(){
+  const e=document.getElementById('camera-error');
+  e.style.display='none';
+  e.textContent='';
+  if(cameraErrorTimer){
+    clearTimeout(cameraErrorTimer);
+    cameraErrorTimer=null;
+  }
+}
+
+function checkLibraries(){
+  return new Promise((resolve, reject)=>{
+    if(typeof AFRAME==='undefined') reject("A-Frame not loaded");
+    if(typeof Papa==='undefined') reject("Papa not loaded");
+    resolve();
+  });
+}
+function loadCsv(url){
+  return fetch(url).then(r=>{
+    if(!r.ok) throw new Error("HTTP Error:"+r.status);
+    return r.text();
+  });
+}
+function parseCsvData(csvData){
+  return new Promise((resolve, reject)=>{
+    Papa.parse(csvData,{
+      header:true,
+      complete:resolve,
+      error:reject,
+      dynamicTyping:true
+    });
+  });
+}
+function parsePlayerData3D(data){
+  const p={};
+  data.forEach(row=>{
+    const t=parseFloat(row["Time[s]"]);
+    Object.keys(row).forEach(k=>{
+      if(k.includes("Player")&&k.includes("X")){
+        const pid=k.split(" ")[0];
+        const yK=pid+" Y";
+        if(!p[pid]) p[pid]=[];
+        let xx=row[k], yy=row[yK];
+        if(!isNaN(xx)&&!isNaN(yy)){
+          p[pid].push({time:t,position: csvTo3D(xx,yy)});
+        } else {
+          p[pid].push({time:t,position:null});
+        }
+      }
+    });
+  });
+  return p;
+}
+function parseBallData3D(data){
+  const b=[];
+  data.forEach(row=>{
+    const t= parseFloat(row["Time[s]"]);
+    let bx=row["Ball X"], by=row["Ball Y"];
+    if(!isNaN(bx)&&!isNaN(by)){
+      let pos= csvTo3D(bx,by);
+      pos.y=-0.5;
+      b.push({time:t, position:pos});
+    } else {
+      b.push({time:t, position:null});
+    }
+  });
+  return b;
+}
+function parsePlayerData2D(data){
+  const p={};
+  data.forEach(row=>{
+    const t=parseFloat(row["Time[s]"]);
+    Object.keys(row).forEach(k=>{
+      if(k.includes("Player")&&k.includes("X")){
+        const pid=k.split(" ")[0];
+        const yK=pid+" Y";
+        if(!p[pid]) p[pid]=[];
+        let xx=row[k], yy=row[yK];
+        if(!isNaN(xx)&&!isNaN(yy)){
+          p[pid].push({time:t, x:xx, y:yy});
+        } else {
+          p[pid].push({time:t, x:null,y:null});
+        }
+      }
+    });
+  });
+  return p;
+}
+function parseBallData2D(data){
+  const b=[];
+  data.forEach(row=>{
+    const t= parseFloat(row["Time[s]"]);
+    let bx=row["Ball X"], by=row["Ball Y"];
+    if(!isNaN(bx)&&!isNaN(by)){
+      b.push({time:t,x:bx,y:by});
+    } else {
+      b.push({time:t,x:null,y:null});
+    }
+  });
+  return b;
+}
+function parseEventData(data){
+  let arr=[];
+  data.forEach(r=>{
+    let frame=parseInt(r["Start Frame"],10);
+    let time=parseFloat(r["Start Time [s]"]);
+    let type=(r["Type"]||"").toUpperCase();
+    let sub=(r["SubType"]||"").toUpperCase();
+    let from=(r["From"]||"").trim();
+    let to=(r["To"]||"").trim();
+    arr.push({frame,time,type,subtype:sub,from,to});
+  });
+  return arr;
+}
+let staticLastTime=-999;
+const eventTimeThreshold=0.05;
+function checkAndTriggerEvents(nowSec){
+  if(Math.abs(nowSec-staticLastTime)< eventTimeThreshold*2)return;
+  const triggered= eventsData.filter(ev=>{
+    if(!ev.time)return false;
+    return Math.abs(ev.time-nowSec)< eventTimeThreshold;
+  });
+  if(triggered.length===0)return;
+  staticLastTime=nowSec;
+  triggered.forEach(ev=>{
+    let msg=`[${(ev.time||0).toFixed(2)}s] ${ev.type}`;
+    if(ev.subtype) msg+=`(${ev.subtype})`;
+    if(ev.from||ev.to) msg+=` [${ev.from}->${ev.to}]`;
+    appendEventLog(msg);
+  });
+}
+
+function createPlayerEntities3D(scene,pData,color,team){
+  Object.keys(pData).forEach(pid=>{
+    const jn= pid.replace("Player","");
+    const grp=document.createElement("a-entity");
+    grp.setAttribute("id","player-"+pid);
+
+    // 頭
+    const head=document.createElement("a-sphere");
+    head.setAttribute("radius","0.3");
+    head.setAttribute("color",color);
+    head.setAttribute("position","0 1.6 0");
+
+    // 胴体
+    const body=document.createElement("a-cylinder");
+    body.setAttribute("radius","0.3");
+    body.setAttribute("height","1.2");
+    body.setAttribute("color",color);
+    body.setAttribute("opacity","0.8");
+    body.setAttribute("position","0 0.6 0");
+
+    // 脚
+    const legs=document.createElement("a-cylinder");
+    legs.setAttribute("radius","0.2");
+    legs.setAttribute("height","0.8");
+    legs.setAttribute("color",color);
+    legs.setAttribute("opacity","0.8");
+    legs.setAttribute("position","0 -0.4 0");
+
+    // 背番号
+    const prefix=(team==='home')?'H':'A';
+    const txt=document.createElement('a-text');
+    txt.setAttribute('value', prefix+jn);
+    txt.setAttribute('align','center');
+    txt.setAttribute('position','0 2.2 0');
+    txt.setAttribute('scale','0.8 0.8 0.8');
+    txt.setAttribute('color','black');
+
+    grp.setAttribute('scale','1.5 1.5 1.5');
+    grp.appendChild(head);
+    grp.appendChild(body);
+    grp.appendChild(legs);
+    grp.appendChild(txt);
+
+    // 選手カメラ
+    const pcam=document.createElement('a-entity');
+    pcam.setAttribute('position','0 1.6 0');
+    pcam.setAttribute('camera','active:false');
+    pcam.setAttribute('look-controls','');
+    grp.appendChild(pcam);
+
+    playerCameras.push({
+      team, number: jn, cameraEl: pcam, playerId: pid
+    });
+    scene.appendChild(grp);
+  });
+}
+function createBallEntity3D(scene, bData){
+  if(bData.length===0)return;
+  const ball=document.createElement('a-entity');
+  ball.setAttribute('id','soccer-ball');
+  ball.setAttribute('gltf-model','url(soccer_ball.glb)');
+  ball.setAttribute('scale','0.5 0.5 0.5');
+  scene.appendChild(ball);
+}
+function initPlayerDots2D(pData, team){
+  const cont=document.getElementById('tactical-dots');
+  Object.keys(pData).forEach(pid=>{
+    const jn= pid.replace("Player","");
+    const dot=document.createElement('div');
+    dot.classList.add('dot');
+    if(team==='home') dot.classList.add('player-dot-home');
+    else dot.classList.add('player-dot-away');
+    dot.id='player-dot-'+pid;
+    dot.textContent= jn;
+    dot.style.display='none';
+    cont.appendChild(dot);
+  });
+}
+
+function animateAll(){
+  if(!isPlaying)return;
+  const now=(Date.now()-startTime+pauseTime)/1000;
+  const tDisp=document.getElementById('time-display');
+
+  for(let i=currentIndex;i<timings.length;i++){
+    if(now>=timings[i]){
+      updatePositions3DAtIndex(i);
+      currentIndex=i;
+    } else break;
+  }
+  updatePositions2DAtIndex(currentIndex);
+  checkAndTriggerEvents(now);
+
+  let m=Math.floor(now/60), s=Math.floor(now%60);
+  tDisp.textContent=`${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+  if(currentIndex<timings.length-1){
+    animationFrameId= requestAnimationFrame(animateAll);
+  }
+}
+function updatePositions3DAtIndex(idx){
+  Object.keys(players3D.home).forEach(pid=>{
+    const arr=players3D.home[pid];
+    const el=document.getElementById('player-'+pid);
+    if(!el)return;
+    if(arr[idx]&&arr[idx].position){
+      el.setAttribute('position',arr[idx].position);
+      el.setAttribute('visible',true);
+    } else {
+      el.setAttribute('visible',false);
+    }
+  });
+  Object.keys(players3D.away).forEach(pid=>{
+    const arr=players3D.away[pid];
+    const el=document.getElementById('player-'+pid);
+    if(!el)return;
+    if(arr[idx]&&arr[idx].position){
+      el.setAttribute('position',arr[idx].position);
+      el.setAttribute('visible',true);
+    } else {
+      el.setAttribute('visible',false);
+    }
+  });
+  const b3d=document.getElementById('soccer-ball');
+  if(b3d){
+    if(ballData3D[idx]&&ballData3D[idx].position){
+      b3d.setAttribute('position',ballData3D[idx].position);
+      b3d.setAttribute('visible',true);
+    } else {
+      b3d.setAttribute('visible',false);
+    }
+  }
+}
+function updatePositions2DAtIndex(idx){
+  if(!isTacticalBoardOpen)return;
+  updateCameraDot2D();
+
+  // ball
+  const b2d=document.getElementById('ball-2d');
+  if(ballData2D[idx] && ballData2D[idx].x!==null && ballData2D[idx].y!==null){
+    b2d.style.display='block';
+    const pxPos= csvToPx(ballData2D[idx].x, ballData2D[idx].y);
+    b2d.style.left=(pxPos.x -6)+'px';
+    b2d.style.top =(pxPos.y -6)+'px';
+  } else {
+    b2d.style.display='none';
+  }
+  // home
+  Object.keys(players2D.home).forEach(pid=>{
+    const arr=players2D.home[pid];
+    const dot=document.getElementById('player-dot-'+pid);
+    if(!dot)return;
+    if(arr[idx] && arr[idx].x!==null && arr[idx].y!==null){
+      dot.style.display='block';
+      const pxPos= csvToPx(arr[idx].x, arr[idx].y);
+      dot.style.left=(pxPos.x -8)+'px';
+      dot.style.top =(pxPos.y -8)+'px';
+    } else {
+      dot.style.display='none';
+    }
+  });
+  // away
+  Object.keys(players2D.away).forEach(pid=>{
+    const arr=players2D.away[pid];
+    const dot=document.getElementById('player-dot-'+pid);
+    if(!dot)return;
+    if(arr[idx]&&arr[idx].x!==null&&arr[idx].y!==null){
+      dot.style.display='block';
+      const pxPos= csvToPx(arr[idx].x,arr[idx].y);
+      dot.style.left=(pxPos.x -8)+'px';
+      dot.style.top =(pxPos.y -8)+'px';
+    } else {
+      dot.style.display='none';
+    }
+  });
+}
+function updateCameraDot2D(){
+  const rig=document.getElementById('camera-rig');
+  const pos=rig.object3D.position;
+  const csvX= threeDtoCsvX(pos.x);
+  const csvY= threeDtoCsvY(pos.z);
+  const pxPos= csvToPx(csvX,csvY);
+  const cDot=document.getElementById('camera-dot');
+  cDot.style.left=(pxPos.x-5)+'px';
+  cDot.style.top =(pxPos.y-5)+'px';
+}
+
+/** ドラッグ => 3D同期 (Pause中のみ) */
+let draggingDot=null;
+let dragOffsetX=0, dragOffsetY=0;
+function enable2DDotDragging(){
+  const cont=document.getElementById('tactical-dots');
+  cont.addEventListener('mousedown', e=>{
+    if(!e.target.classList.contains('dot') && e.target.id!=='ball-2d') return;
+    if(isPlaying) return; // pause中のみ
+    draggingDot=e.target;
+    const rect= draggingDot.getBoundingClientRect();
+    dragOffsetX= e.clientX - rect.left;
+    dragOffsetY= e.clientY - rect.top;
+  });
+  cont.addEventListener('mousemove', e=>{
+    if(!draggingDot||isPlaying) return;
+    const cRect= cont.getBoundingClientRect();
+    let px= e.clientX - cRect.left - dragOffsetX;
+    let py= e.clientY - cRect.top  - dragOffsetY;
+    draggingDot.style.left= px+'px';
+    draggingDot.style.top=  py+'px';
+
+    let cx= px+8, cy= py+8;
+    if(draggingDot.id==='ball-2d'){
+      cx= px+6; cy= py+6;
+    }
+    // px->csv
+    const c= pxToCsv(cx,cy);
+    // csv->3D
+    let pos3d= csvTo3D(c.x,c.y);
+    if(draggingDot.id.startsWith('player-dot-')){
+      const pid= draggingDot.id.replace('player-dot-','');
+      const ent=document.getElementById('player-'+pid);
+      if(ent){
+        ent.setAttribute('position',pos3d);
+        ent.setAttribute('visible',true);
+      }
+    } else if(draggingDot.id==='ball-2d'){
+      const b3d=document.getElementById('soccer-ball');
+      if(b3d){
+        pos3d.y=-0.5;
+        b3d.setAttribute('position',pos3d);
+        b3d.setAttribute('visible',true);
+      }
+    }
+  });
+  cont.addEventListener('mouseup', e=>{
+    draggingDot=null;
+  });
+}
+
+/******************************************************************************
+ * onLoad
+ ******************************************************************************/
+window.addEventListener('load', ()=>{
+  const homeCsvUrl='data/Sample_Game_1_RawTrackingData_Home_Team.csv';
+  const awayCsvUrl='data/Sample_Game_1_RawTrackingData_Away_Team.csv';
+  const eventCsvUrl='data/Sample_Game_1_RawEventsData.csv';
+  const cameraRig=document.getElementById('camera-rig');
+
+  // E/Q/R
+  window.addEventListener('keydown', e=>{
+    const pos=cameraRig.getAttribute('position');
+    switch(e.key){
+      case 'e':
+        if(pos.y<0) pos.y=0;
+        verticalVelocity=0.2;
+        break;
+      case 'q':
+        verticalVelocity=-0.2;
+        break;
+      case 'r':
+        isHeightLocked=true;
+        break;
+    }
+  });
+  window.addEventListener('keyup', e=>{
+    if(e.key==='e'||e.key==='q') verticalVelocity=0;
+    else if(e.key==='r') isHeightLocked=false;
+  });
+  function animateVertical(){
+    const pos=cameraRig.getAttribute('position');
+    if(!isHeightLocked && verticalVelocity!==0){
+      let ny=pos.y+ verticalVelocity;
+      if(ny<0) ny=0;
+      cameraRig.setAttribute('position',{x:pos.x,y:ny,z:pos.z});
+    }
+    requestAnimationFrame(animateVertical);
+  }
+  animateVertical();
+
+  // CSV読み込み
+  checkLibraries()
+  .then(()=> Promise.all([
+    loadCsv(homeCsvUrl),
+    loadCsv(awayCsvUrl),
+    loadCsv(eventCsvUrl)
+  ]))
+  .then(([homeCsv, awayCsv, eventCsv])=> Promise.all([
+    parseCsvData(homeCsv),
+    parseCsvData(awayCsv),
+    parseCsvData(eventCsv)
+  ]))
+  .then(([homeParsed, awayParsed, eventParsed])=>{
+    const homeData= homeParsed.data;
+    const awayData= awayParsed.data;
+    if(!homeData||homeData.length===0) throw new Error("Home CSVが空");
+    if(!awayData||awayData.length===0) throw new Error("Away CSVが空");
+
+    players3D.home= parsePlayerData3D(homeData);
+    players3D.away= parsePlayerData3D(awayData);
+    ballData3D= parseBallData3D(homeData);
+
+    players2D.home= parsePlayerData2D(homeData);
+    players2D.away= parsePlayerData2D(awayData);
+    ballData2D= parseBallData2D(homeData);
+
+    timings= ballData3D.map(e=> e.time);
+
+    if(!eventParsed.data||eventParsed.data.length===0){
+      appendEventLog("Event CSVなし");
+    } else {
+      eventsData= parseEventData(eventParsed.data);
+      appendEventLog("Event CSV: "+eventsData.length+"件");
+    }
+
+    // シーン
+    const scene=document.querySelector('a-scene');
+    createPlayerEntities3D(scene, players3D.home,'blue','home');
+    createPlayerEntities3D(scene, players3D.away,'red','away');
+    createBallEntity3D(scene, ballData3D);
+
+    // 2D 戦術ボード
+    initPlayerDots2D(players2D.home,'home');
+    initPlayerDots2D(players2D.away,'away');
+
+    document.getElementById('loading').style.display='none';
+    appendEventLog("トラッキング＆イベントデータ ロード完了");
+
+    // ドラッグ同期
+    enable2DDotDragging();
+  })
+  .catch(err=>{
+    showErrorInHtml("エラー:"+err.message);
+  });
+});
+
+/******************************************************************************
+ * 再生/停止/ジャンプ
+ ******************************************************************************/
+function animateAll(){
+  if(!isPlaying)return;
+  const now=(Date.now()-startTime+pauseTime)/1000;
+  const tDisp=document.getElementById('time-display');
+
+  for(let i=currentIndex;i<timings.length;i++){
+    if(now>=timings[i]){
+      updatePositions3DAtIndex(i);
+      currentIndex=i;
+    } else break;
+  }
+  updatePositions2DAtIndex(currentIndex);
+  checkAndTriggerEvents(now);
+
+  let m=Math.floor(now/60), s=Math.floor(now%60);
+  tDisp.textContent=`${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+  if(currentIndex<timings.length-1){
+    animationFrameId= requestAnimationFrame(animateAll);
+  }
+}
+document.getElementById('play-button').addEventListener('click',()=>{
+  if(!isPlaying){
+    isPlaying=true;
+    startTime=Date.now();
+    animateAll();
+  }
+});
+document.getElementById('pause-button').addEventListener('click',()=>{
+  if(isPlaying){
+    isPlaying=false;
+    pauseTime+=(Date.now()-startTime);
+    cancelAnimationFrame(animationFrameId);
+  }
+});
+document.getElementById('skip-forward-button').addEventListener('click',()=>{
+  const now=(Date.now()-startTime+pauseTime)/1000;
+  jumpToTime(now+10);
+});
+document.getElementById('skip-backward-button').addEventListener('click',()=>{
+  const now=(Date.now()-startTime+pauseTime)/1000;
+  jumpToTime(Math.max(0, now-10));
+});
+document.getElementById('jump-button').addEventListener('click',()=>{
+  const val=document.getElementById('jump-input').value;
+  const t= parseTimeInput(val);
+  if(t!==null) jumpToTime(t);
+});
+function parseTimeInput(inp){
+  let m,s;
+  if(inp.includes(':')){
+    const parts=inp.split(':');
+    if(parts.length===2){
+      m=parseInt(parts[0],10);
+      s=parseInt(parts[1],10);
+    }
+  } else {
+    if(inp.length===4){
+      m=parseInt(inp.substring(0,2),10);
+      s=parseInt(inp.substring(2,4),10);
+    } else if(inp.length===3){
+      m=parseInt(inp.substring(0,1),10);
+      s=parseInt(inp.substring(1,3),10);
+    } else {
+      showErrorInHtml("時間入力不正(例:01:49 or 0149)");
+      return null;
+    }
+  }
+  if(isNaN(m)||isNaN(s)||m<0||s<0||s>=60){
+    showErrorInHtml("時間入力が不正です。MM:SS or MMSS形式");
+    return null;
+  }
+  return m*60+s;
+}
+function jumpToTime(t){
+  pauseTime= t*1000;
+  startTime= Date.now();
+  currentIndex= getCurrentIndex(t);
+  updatePositions3DAtIndex(currentIndex);
+  updatePositions2DAtIndex(currentIndex);
+  if(isPlaying) animateAll();
+}
+function getCurrentIndex(tt){
+  for(let i=0;i<timings.length;i++){
+    if(timings[i]>=tt) return i;
+  }
+  return timings.length-1;
+}
+
+/******************************************************************************
+ * 選手視点カメラ
+ ******************************************************************************/
+const togglePlayerCameraButton=document.getElementById('toggle-player-camera-button');
+const playerCameraPanel=document.getElementById('player-camera-panel');
+const homeTeamButton=document.getElementById('home-team-button');
+const awayTeamButton=document.getElementById('away-team-button');
+const playerNumberList=document.getElementById('player-number-list');
+
+togglePlayerCameraButton.addEventListener('click',()=>{
+  isPlayerCameraPanelOpen=!isPlayerCameraPanelOpen;
+  hideCameraError();
+  if(isPlayerCameraPanelOpen){
+    playerCameraPanel.style.display='block';
+  } else {
+    playerCameraPanel.style.display='none';
+    // 全選手カメラOFF & メインカメラON
+    playerCameras.forEach(pc=>{
+      pc.cameraEl.setAttribute('camera','active',false);
+    });
+    document.getElementById('main-camera').setAttribute('camera','active',true);
+  }
+});
+homeTeamButton.addEventListener('click',()=>{
+  hideCameraError();
+  showPlayerNumberList('home');
+});
+awayTeamButton.addEventListener('click',()=>{
+  hideCameraError();
+  showPlayerNumberList('away');
+});
+function showPlayerNumberList(team){
+  playerNumberList.innerHTML='';
+  const f= playerCameras.filter(pc=>pc.team===team);
+  f.sort((a,b)=> parseInt(a.number)-parseInt(b.number));
+  if(f.length===0){
+    const d=document.createElement('div');
+    d.textContent='該当選手がいません';
+    playerNumberList.appendChild(d);
+    return;
+  }
+  f.forEach(item=>{
+    const btn=document.createElement('button');
+    btn.classList.add('player-number-button');
+    btn.textContent=item.number;
+    btn.addEventListener('click',()=>{
+      hideCameraError();
+      switchToPlayerCamera(item);
+    });
+    playerNumberList.appendChild(btn);
+  });
+}
+function switchToPlayerCamera(camObj){
+  const mainCam=document.getElementById('main-camera');
+  const pEl=document.getElementById('player-'+camObj.playerId);
+  if(!pEl){
+    showCameraError("選手視点カメラ切り替え不可");
+    return;
+  }
+  const isVis=pEl.getAttribute('visible');
+  if(isVis==='false'||!isVis){
+    showCameraError("その選手はフィールドにいません");
+    return;
+  }
+  mainCam.setAttribute('camera','active',false);
+  playerCameras.forEach(pc=>pc.cameraEl.setAttribute('camera','active',false));
+  camObj.cameraEl.setAttribute('camera','active',true);
+}
+
+/******************************************************************************
+ * 戦術ボード
+ ******************************************************************************/
+const toggleTacticalBoardButton=document.getElementById('toggle-tactical-board-button');
+const tacticalBoard=document.getElementById('tactical-board');
+toggleTacticalBoardButton.addEventListener('click',()=>{
+  isTacticalBoardOpen=!isTacticalBoardOpen;
+  if(isTacticalBoardOpen){
+    tacticalBoard.style.display='block';
+    updatePositions2DAtIndex(currentIndex);
+  } else {
+    tacticalBoard.style.display='none';
+  }
+});
+
+/******************************************************************************
+ * イベントログ
+ ******************************************************************************/
+const toggleEventLogButton=document.getElementById('toggle-event-log-button');
+const eventLogDiv=document.getElementById('event-log');
+toggleEventLogButton.addEventListener('click',()=>{
+  isEventLogOpen=!isEventLogOpen;
+  eventLogDiv.style.display= isEventLogOpen?'block':'none';
+});
+  </script>
+</body>
+</html>
